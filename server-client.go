@@ -227,7 +227,7 @@ func (c *serverClient) handleRequest(req *gortsplib.Request) bool {
 
 			st := time.Now()
 			for str.state != _STREAM_STATE_READY {
-				if int(time.Now().Sub(st).Seconds()) > c.p.conf.StreamReadyTimeout {
+				if time.Now().Sub(st) > c.p.conf.StreamReadyTimeout {
 					return nil, fmt.Errorf("stream '%s' is not ready yet", path)
 				}
 
@@ -310,7 +310,7 @@ func (c *serverClient) handleRequest(req *gortsplib.Request) bool {
 
 					st := time.Now()
 					for str.state != _STREAM_STATE_READY {
-						if int(time.Now().Sub(st).Seconds()) > c.p.conf.StreamReadyTimeout {
+						if time.Now().Sub(st) > c.p.conf.StreamReadyTimeout {
 							return fmt.Errorf("stream '%s' is not ready yet", path)
 						}
 

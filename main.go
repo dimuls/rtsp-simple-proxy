@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,12 +53,12 @@ type streamConf struct {
 }
 
 type conf struct {
-	Protocols          []string `yaml:"protocols"`
-	RtspPort           int      `yaml:"rtspPort"`
-	RtpPort            int      `yaml:"rtpPort"`
-	RtcpPort           int      `yaml:"rtcpPort"`
-	StreamReadyTimeout int      `yaml:"streamReadyTimeout"`
-	StreamTTL          int      `yaml:"streamTTL"`
+	Protocols          []string
+	RtspPort           int
+	RtpPort            int
+	RtcpPort           int
+	StreamReadyTimeout time.Duration
+	StreamTTL          time.Duration
 }
 
 func loadConf(confPath string) (*conf, error) {
@@ -102,25 +103,28 @@ func newProgram() (*program, error) {
 	kingpin.CommandLine.Help = "rtsp-simple-proxy " + Version + "\n\n" +
 		"RTSP proxy."
 
-	argVersion := kingpin.Flag("version", "print rtsp-simple-proxy version").Bool()
-	argConfPath := kingpin.Arg("confpath", "path of the config file. Use 'stdin' to read config from stdin").Required().String()
+	protocolsStr := kingpin.Flag("protocols", "supported protocols").
+		Default("tcp,udp").Envar("PROTOCOLS").String()
+	rtspPort := kingpin.Flag("rtsp-port", "port of RTSP TCP listener").
+		Default("8554").Envar("RTSP_PORT").Int()
+	rtpPort := kingpin.Flag("rtp-port", "port of RTP UDP listener").
+		Default("8050").Envar("RTP_PORT").Int()
+	rtcpPort := kingpin.Flag("rtcp-port", "port of RTCP UDP listener").
+		Default("8051").Envar("RTP_PORT").Int()
+	streamReadyTimeout := kingpin.Flag("stream-ready-timeout",
+		"timeout to stream become ready in seconds").Default("10s").Duration()
+	streamTTL := kingpin.Flag("stream-ttl", "stream without clients time to life in seconds").
+		Default("10s").Duration()
 
 	kingpin.Parse()
 
-	version := *argVersion
-	confPath := *argConfPath
-
-	if version == true {
-		fmt.Println("rtsp-simple-proxy " + Version)
-		os.Exit(0)
-	}
-
-	conf, err := loadConf(confPath)
-	if err != nil {
-		return nil, err
-	}
-	if err != nil {
-		return nil, err
+	conf := &conf{
+		Protocols:          strings.Split(*protocolsStr, ","),
+		RtspPort:           *rtspPort,
+		RtpPort:            *rtpPort,
+		RtcpPort:           *rtcpPort,
+		StreamReadyTimeout: *streamReadyTimeout,
+		StreamTTL:          *streamTTL,
 	}
 
 	if conf.RtspPort == 0 {
@@ -141,6 +145,14 @@ func newProgram() (*program, error) {
 
 	if conf.RtcpPort != (conf.RtpPort + 1) {
 		return nil, fmt.Errorf("rtcp port must be rtp port plus 1")
+	}
+
+	if conf.StreamReadyTimeout < time.Second {
+		return nil, fmt.Errorf("too small stream ready timeout")
+	}
+
+	if conf.StreamTTL < time.Second {
+		return nil, fmt.Errorf("too small stream TTL")
 	}
 
 	protocols := make(map[streamProtocol]struct{})
@@ -168,6 +180,8 @@ func newProgram() (*program, error) {
 		clients:   make(map[*serverClient]struct{}),
 		streams:   make(map[string]*stream),
 	}
+
+	var err error
 
 	p.rtpl, err = newServerUdpListener(p, p.conf.RtpPort, _TRACK_FLOW_RTP)
 	if err != nil {
@@ -199,7 +213,7 @@ func newProgram() (*program, error) {
 				}
 
 				for path, lastTime := range streamsClientLastTime {
-					if int(time.Now().Sub(lastTime).Seconds()) >= conf.StreamTTL {
+					if time.Now().Sub(lastTime) >= conf.StreamTTL {
 						s, exists := p.streams[path]
 						if !exists {
 							continue
