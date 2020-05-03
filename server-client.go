@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/aler9/gortsplib"
 )
@@ -129,21 +131,64 @@ func (c *serverClient) handleRequest(req *gortsplib.Request) bool {
 		return false
 	}
 
-	path := func() string {
-		ret := req.Url.Path
+	path := req.Url.Path
 
-		// remove leading slash
-		if len(ret) > 1 {
-			ret = ret[1:]
+	if len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+
+	if len(path) > 0 {
+		if n := strings.Index(path, "/"); n >= 0 {
+			path = path[:n]
 		}
+
+		var err error
+
+		pathBytes, err := base64.StdEncoding.DecodeString(path)
+		if err != nil {
+			c.writeResError(req, gortsplib.StatusBadRequest, fmt.Errorf("failed to to base64 decode RTSP URL: %w", err))
+			return false
+		}
+
+		useTCP := true
+		proto := req.Url.Query().Get("proto")
 
 		// strip any subpath
-		if n := strings.Index(ret, "/"); n >= 0 {
-			ret = ret[:n]
+		if n := strings.Index(proto, "/"); n >= 0 {
+			proto = proto[:n]
 		}
 
-		return ret
-	}()
+		path = string(pathBytes)
+
+		switch proto {
+		case "tcp", "":
+		case "udp":
+			useTCP = false
+		default:
+			c.writeResError(req, gortsplib.StatusBadRequest, fmt.Errorf("invalid proto query param: %s", proto))
+			return false
+		}
+
+		c.p.mutex.RLock()
+		_, exists := c.p.streams[path]
+		c.p.mutex.RUnlock()
+
+		if !exists {
+			str, err := newStream(c.p, path, streamConf{
+				Url:    path,
+				UseTcp: useTCP,
+			})
+			if err != nil {
+				c.writeResError(req, gortsplib.StatusBadRequest, fmt.Errorf(
+					"failed to create stream with given RTSP URL: %s, %w",
+					path, err))
+				return false
+			}
+			c.p.mutex.Lock()
+			c.p.streams[path] = str
+			c.p.mutex.Unlock()
+		}
+	}
 
 	switch req.Method {
 	case gortsplib.OPTIONS:
@@ -180,8 +225,15 @@ func (c *serverClient) handleRequest(req *gortsplib.Request) bool {
 				return nil, fmt.Errorf("there is no stream on path '%s'", path)
 			}
 
-			if str.state != _STREAM_STATE_READY {
-				return nil, fmt.Errorf("stream '%s' is not ready yet", path)
+			st := time.Now()
+			for str.state != _STREAM_STATE_READY {
+				if int(time.Now().Sub(st).Seconds()) > c.p.conf.StreamReadyTimeout {
+					return nil, fmt.Errorf("stream '%s' is not ready yet", path)
+				}
+
+				c.p.mutex.RUnlock()
+				time.Sleep(time.Second)
+				c.p.mutex.RLock()
 			}
 
 			return str.serverSdpText, nil
@@ -256,8 +308,15 @@ func (c *serverClient) handleRequest(req *gortsplib.Request) bool {
 						return fmt.Errorf("there is no stream on path '%s'", path)
 					}
 
-					if str.state != _STREAM_STATE_READY {
-						return fmt.Errorf("stream '%s' is not ready yet", path)
+					st := time.Now()
+					for str.state != _STREAM_STATE_READY {
+						if int(time.Now().Sub(st).Seconds()) > c.p.conf.StreamReadyTimeout {
+							return fmt.Errorf("stream '%s' is not ready yet", path)
+						}
+
+						c.p.mutex.Unlock()
+						time.Sleep(time.Second)
+						c.p.mutex.Lock()
 					}
 
 					if len(c.streamTracks) > 0 && c.streamProtocol != _STREAM_PROTOCOL_UDP {
@@ -291,7 +350,7 @@ func (c *serverClient) handleRequest(req *gortsplib.Request) bool {
 							"RTP/AVP/UDP",
 							"unicast",
 							fmt.Sprintf("client_port=%d-%d", rtpPort, rtcpPort),
-							fmt.Sprintf("server_port=%d-%d", c.p.conf.Server.RtpPort, c.p.conf.Server.RtcpPort),
+							fmt.Sprintf("server_port=%d-%d", c.p.conf.RtpPort, c.p.conf.RtcpPort),
 						}, ";")},
 						"Session": []string{"12345678"},
 					},

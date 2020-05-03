@@ -52,13 +52,12 @@ type streamConf struct {
 }
 
 type conf struct {
-	Server struct {
-		Protocols []string `yaml:"protocols"`
-		RtspPort  int      `yaml:"rtspPort"`
-		RtpPort   int      `yaml:"rtpPort"`
-		RtcpPort  int      `yaml:"rtcpPort"`
-	} `yaml:"server"`
-	Streams map[string]streamConf `yaml:"streams"`
+	Protocols          []string `yaml:"protocols"`
+	RtspPort           int      `yaml:"rtspPort"`
+	RtpPort            int      `yaml:"rtpPort"`
+	RtcpPort           int      `yaml:"rtcpPort"`
+	StreamReadyTimeout int      `yaml:"streamReadyTimeout"`
+	StreamTTL          int      `yaml:"streamTTL"`
 }
 
 func loadConf(confPath string) (*conf, error) {
@@ -124,28 +123,28 @@ func newProgram() (*program, error) {
 		return nil, err
 	}
 
-	if conf.Server.RtspPort == 0 {
+	if conf.RtspPort == 0 {
 		return nil, fmt.Errorf("rtsp port not provided")
 	}
 
-	if conf.Server.RtpPort == 0 {
+	if conf.RtpPort == 0 {
 		return nil, fmt.Errorf("rtp port not provided")
 	}
 
-	if conf.Server.RtcpPort == 0 {
+	if conf.RtcpPort == 0 {
 		return nil, fmt.Errorf("rtcp port not provided")
 	}
 
-	if (conf.Server.RtpPort % 2) != 0 {
+	if (conf.RtpPort % 2) != 0 {
 		return nil, fmt.Errorf("rtp port must be even")
 	}
 
-	if conf.Server.RtcpPort != (conf.Server.RtpPort + 1) {
+	if conf.RtcpPort != (conf.RtpPort + 1) {
 		return nil, fmt.Errorf("rtcp port must be rtp port plus 1")
 	}
 
 	protocols := make(map[streamProtocol]struct{})
-	for _, proto := range conf.Server.Protocols {
+	for _, proto := range conf.Protocols {
 		switch proto {
 		case "udp":
 			protocols[_STREAM_PROTOCOL_UDP] = struct{}{}
@@ -161,10 +160,6 @@ func newProgram() (*program, error) {
 		return nil, fmt.Errorf("no protocols provided")
 	}
 
-	if len(conf.Streams) == 0 {
-		return nil, fmt.Errorf("no streams provided")
-	}
-
 	log.Printf("rtsp-simple-proxy %s", Version)
 
 	p := &program{
@@ -174,12 +169,12 @@ func newProgram() (*program, error) {
 		streams:   make(map[string]*stream),
 	}
 
-	p.rtpl, err = newServerUdpListener(p, p.conf.Server.RtpPort, _TRACK_FLOW_RTP)
+	p.rtpl, err = newServerUdpListener(p, p.conf.RtpPort, _TRACK_FLOW_RTP)
 	if err != nil {
 		return nil, err
 	}
 
-	p.rtcpl, err = newServerUdpListener(p, p.conf.Server.RtcpPort, _TRACK_FLOW_RTCP)
+	p.rtcpl, err = newServerUdpListener(p, p.conf.RtcpPort, _TRACK_FLOW_RTCP)
 	if err != nil {
 		return nil, err
 	}
@@ -189,13 +184,37 @@ func newProgram() (*program, error) {
 		return nil, err
 	}
 
-	for path, val := range p.conf.Streams {
-		var err error
-		p.streams[path], err = newStream(p, path, val)
-		if err != nil {
-			return nil, err
+	go func() {
+		t := time.NewTicker(1 * time.Second)
+
+		streamsClientLastTime := map[string]time.Time{}
+
+		for {
+			select {
+			case <-t.C:
+				p.mutex.Lock()
+
+				for c := range p.clients {
+					streamsClientLastTime[c.path] = time.Now()
+				}
+
+				for path, lastTime := range streamsClientLastTime {
+					if int(time.Now().Sub(lastTime).Seconds()) >= conf.StreamTTL {
+						s, exists := p.streams[path]
+						if !exists {
+							continue
+						}
+						s.log("have no clients, stopping")
+						close(s.stop)
+						delete(p.streams, path)
+						delete(streamsClientLastTime, path)
+					}
+				}
+
+				p.mutex.Unlock()
+			}
 		}
-	}
+	}()
 
 	return p, nil
 }

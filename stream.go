@@ -109,6 +109,8 @@ type stream struct {
 	clientSdpParsed *sdp.Message
 	serverSdpText   []byte
 	serverSdpParsed *sdp.Message
+
+	stop chan struct{}
 }
 
 func newStream(p *program, path string, conf streamConf) (*stream, error) {
@@ -137,6 +139,7 @@ func newStream(p *program, path string, conf streamConf) (*stream, error) {
 		conf:  conf,
 		ur:    ur,
 		proto: proto,
+		stop:  make(chan struct{}),
 	}
 
 	go s.run()
@@ -153,6 +156,13 @@ func (s *stream) run() {
 	firstTime := true
 
 	for {
+		select {
+		case <-s.stop:
+			s.log("stopped")
+			return
+		default:
+		}
+
 		if firstTime {
 			firstTime = false
 		} else {
@@ -475,6 +485,8 @@ func (s *stream) runUdp(conn *gortsplib.ConnClient) {
 
 	for {
 		select {
+		case <-s.stop:
+			return
 		case <-tickerSendKeepalive.C:
 			_, err = conn.WriteRequest(&gortsplib.Request{
 				Method: gortsplib.OPTIONS,
@@ -623,6 +635,12 @@ func (s *stream) runTcp(conn *gortsplib.ConnClient) {
 	s.log("ready")
 
 	for {
+		select {
+		case <-s.stop:
+			return
+		default:
+		}
+
 		frame, err := conn.ReadInterleavedFrame()
 		if err != nil {
 			s.log("ERR: %s", err)
